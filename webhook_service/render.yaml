@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: 104-job-alert-webhook
+    runtime: python
+    plan: free
+    rootDir: .
+    buildCommand: pip install -r webhook_service/requirements.txt
+    startCommand: gunicorn webhook_service.app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        sync: false
+      - key: SUPABASE_DB_URL
+        sync: false
