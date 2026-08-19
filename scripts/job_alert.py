@@ -54,6 +54,10 @@ PAGE_LIMIT = 6
 # 只抓「isnew 天數內」有更新的職缺，降低資料量（104 的 isnew 語意較接近「近期有更新」而非嚴格新刊登）
 ISNEW_DAYS = 14
 
+# 每位訂閱者每次執行最多推播幾筆新職缺（優先送最近更新的），避免一次收到太多訊息；
+# 沒送到的職缺會留到下次執行繼續判斷是否還沒通知過，之後幾次執行會陸續送出
+MAX_JOBS_PER_RUN = 5
+
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 
@@ -350,16 +354,18 @@ def main() -> None:
 
         seen = db.get_seen_job_nos(sub["line_user_id"])
         new_jobs = [job for job in matched if job["jobNo"] not in seen]
+        new_jobs.sort(key=lambda job: job.get("appearDate") or "", reverse=True)
+        jobs_to_send = new_jobs[:MAX_JOBS_PER_RUN]
 
         print(
             f"訂閱者 {sub['line_user_id']}：符合條件 {len(matched)} 筆，"
-            f"其中尚未通知過 {len(new_jobs)} 筆"
+            f"其中尚未通知過 {len(new_jobs)} 筆，本次推播 {len(jobs_to_send)} 筆"
         )
 
-        if new_jobs:
-            messages = [format_job_message(job) for job in new_jobs]
+        if jobs_to_send:
+            messages = [format_job_message(job) for job in jobs_to_send]
             send_line_messages(messages, to=sub["line_user_id"])
-            db.mark_seen(sub["line_user_id"], [job["jobNo"] for job in new_jobs])
+            db.mark_seen(sub["line_user_id"], [job["jobNo"] for job in jobs_to_send])
 
 
 if __name__ == "__main__":
