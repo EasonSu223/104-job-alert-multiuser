@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 104 人力銀行職缺自動通知程式（多使用者版）
+GitHub Actions 排程固定每小時觸發一次這支程式，但實際上多久幫某個訂閱者「檢查一次」
+是由他自己的 notify_interval_hours 決定（自然語言訂閱時可以說「改成每 3 小時通知我」）；
 每次執行會：
-  1. 從 Supabase 讀取所有啟用中的訂閱者（各自的關鍵字／地區／薪資條件）
+  1. 從 Supabase 讀取所有啟用中的訂閱者（各自的關鍵字／地區／薪資／通知頻率條件）
   2. 依「所有訂閱者關鍵字聯集」向 104 職缺搜尋 API 抓取候選職缺（通勤地區 + 全遠端 兩種查詢）
-  3. 對每個訂閱者，用他自己的條件過濾候選職缺
+  3. 對每個「該檢查了」的訂閱者（距離上次檢查已超過他設定的頻率），用他自己的條件過濾候選職缺
   4. 排除已經通知過該訂閱者的職缺（記錄在 Supabase 的 seen_jobs 表）
-  5. 把新符合條件的職缺，透過 LINE Messaging API 推播給該訂閱者
+  5. 把新符合條件的職缺（每次最多 MAX_JOBS_PER_RUN 筆），透過 LINE Messaging API 推播給該訂閱者
 """
 
 import os
@@ -14,6 +16,7 @@ import random
 import sys
 import time
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -54,9 +57,10 @@ PAGE_LIMIT = 6
 # 只抓「isnew 天數內」有更新的職缺，降低資料量（104 的 isnew 語意較接近「近期有更新」而非嚴格新刊登）
 ISNEW_DAYS = 14
 
-# 每位訂閱者每次執行最多推播幾筆新職缺（優先送最近更新的），避免一次收到太多訊息；
-# 沒送到的職缺會留到下次執行繼續判斷是否還沒通知過，之後幾次執行會陸續送出
-MAX_JOBS_PER_RUN = 5
+# 訂閱者沒有自訂「每次最多幾筆」時的預設值（使用者可透過 LINE 訊息自訂，範圍 1~20，
+# 存在 Supabase 的 max_jobs_per_run 欄位）。優先送最近更新的職缺，沒送到的職缺會留到
+# 下次執行繼續判斷是否還沒通知過，之後幾次執行會陸續送出
+DEFAULT_MAX_JOBS_PER_RUN = 5
 
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
@@ -340,7 +344,20 @@ def main() -> None:
     }
     print(f"通過全域規則（標題/技術棧）共 {len(globally_ok)} 筆")
 
+    now = datetime.now(timezone.utc)
+
     for sub in subscribers:
+        interval_hours = sub.get("notify_interval_hours") or 1
+        last_checked = sub.get("last_checked_at")
+        due = last_checked is None or (now - last_checked) >= timedelta(hours=interval_hours)
+        if not due:
+            next_check = last_checked + timedelta(hours=interval_hours)
+            print(
+                f"訂閱者 {sub['line_user_id']}：通知頻率每 {interval_hours} 小時一次，"
+                f"還沒到檢查時間（預計 {next_check.isoformat()} 之後），本次跳過"
+            )
+            continue
+
         sub_keywords = set(sub["keywords"])
         sub_candidates = [
             job for job_no, job in globally_ok.items()
@@ -355,7 +372,8 @@ def main() -> None:
         seen = db.get_seen_job_nos(sub["line_user_id"])
         new_jobs = [job for job in matched if job["jobNo"] not in seen]
         new_jobs.sort(key=lambda job: job.get("appearDate") or "", reverse=True)
-        jobs_to_send = new_jobs[:MAX_JOBS_PER_RUN]
+        max_jobs = sub.get("max_jobs_per_run") or DEFAULT_MAX_JOBS_PER_RUN
+        jobs_to_send = new_jobs[:max_jobs]
 
         print(
             f"訂閱者 {sub['line_user_id']}：符合條件 {len(matched)} 筆，"
@@ -366,6 +384,8 @@ def main() -> None:
             messages = [format_job_message(job) for job in jobs_to_send]
             send_line_messages(messages, to=sub["line_user_id"])
             db.mark_seen(sub["line_user_id"], [job["jobNo"] for job in jobs_to_send])
+
+        db.mark_checked(sub["line_user_id"])
 
 
 if __name__ == "__main__":
