@@ -29,9 +29,9 @@ WELCOME_MESSAGE = (
     "歡迎使用找工作小幫手！請直接傳一句話告訴我你想找什麼樣的工作，例如：\n"
     "「我想找台北的前端工程師工作，年薪至少100萬」\n"
     "「我想找頂埔到忠孝敦化之間、步行五分鐘內的後端工程師，年薪至少100萬」\n\n"
-    "之後我每小時都會幫你檢查一次新職缺（預設一次最多通知最新 5 筆，其餘留到下次繼續通知），"
-    "傳訊息通知你。想改成不同的頻率或筆數，直接傳「改成每 3 小時通知我」「一次給我10筆就好」"
-    "之類的句子即可（筆數最多 20）。\n"
+    "之後我每小時都會幫你檢查一次新職缺（預設一次最多通知最新 5 筆，其餘留到下次繼續通知，"
+    "預設也會一併通知全遠端職缺），傳訊息通知你。想改成不同的頻率、筆數或不要遠端職缺，直接傳"
+    "「改成每 3 小時通知我」「一次給我10筆就好」「不要遠端職缺」之類的句子即可（筆數最多 20）。\n"
     "想取消訂閱，隨時傳「取消訂閱」即可。"
 )
 UNCLEAR_MESSAGE = (
@@ -68,7 +68,9 @@ def _reply(reply_token: str, text: str) -> None:
         print(f"[錯誤] LINE 回覆失敗：HTTP {resp.status_code} {resp.text}", file=sys.stderr)
 
 
-def _confirmation_message(parsed: dict, notify_interval_hours: int, max_jobs_per_run: int) -> str:
+def _confirmation_message(
+    parsed: dict, notify_interval_hours: int, max_jobs_per_run: int, include_remote: bool
+) -> str:
     keywords_line = "、".join(parsed["keywords"])
     mrt_stations = parsed.get("mrt_stations")
     if mrt_stations:
@@ -76,20 +78,22 @@ def _confirmation_message(parsed: dict, notify_interval_hours: int, max_jobs_per
         walk_bit = f"，步行 {walk_km} 公里內" if walk_km else ""
         area_line = f"{mrt_stations[0]}↔{mrt_stations[-1]}{walk_bit}"
     else:
-        area_line = parsed["area"] or "不限（含遠端）"
+        area_line = parsed["area"] or "不限"
+    remote_line = "包含" if include_remote else "不包含"
     salary = parsed["min_annual_salary"]
     salary_line = f"{salary:,}" if salary else "不限"
     return (
         "已經幫你更新訂閱條件 ✅\n"
         f"關鍵字：{keywords_line}\n"
         f"地區：{area_line}\n"
+        f"是否含遠端職缺：{remote_line}\n"
         f"最低年薪：{salary_line}\n"
         f"通知頻率：每 {notify_interval_hours} 小時檢查一次\n"
         f"每次最多通知：{max_jobs_per_run} 筆\n\n"
         "其餘尚未通知過的職缺會留到下次繼續通知，不會漏掉。\n"
-        "想修改條件，直接再傳一次新的需求就會覆蓋舊的設定（通知頻率、筆數除外，沒提到就會沿用原本"
-        "設定）；想單獨調整這兩項，傳「改成每 X 小時通知我」「一次給我 X 筆就好」；想取消訂閱，"
-        "傳「取消訂閱」。"
+        "想修改條件，直接再傳一次新的需求就會覆蓋舊的設定（通知頻率、筆數、是否含遠端除外，沒提到"
+        "就會沿用原本設定）；想單獨調整這幾項，傳「改成每 X 小時通知我」「一次給我 X 筆就好」"
+        "「不要遠端職缺」；想取消訂閱，傳「取消訂閱」。"
     )
 
 
@@ -113,6 +117,7 @@ def _handle_text_message(user_id: str, reply_token: str, text: str) -> None:
 
     interval = parsed.get("notify_interval_hours")
     max_jobs_per_run = parsed.get("max_jobs_per_run")
+    include_remote = parsed.get("include_remote")
 
     # 訊息裡沒有任何職稱關鍵字，代表使用者只是想單獨調整通知設定，不要動到既有的職缺條件
     if not parsed["keywords"]:
@@ -121,9 +126,14 @@ def _handle_text_message(user_id: str, reply_token: str, text: str) -> None:
             changes.append(f"通知頻率：每 {interval} 小時檢查一次")
         if max_jobs_per_run is not None:
             changes.append(f"每次最多通知：{max_jobs_per_run} 筆")
+        if include_remote is not None:
+            changes.append(f"是否含遠端職缺：{'包含' if include_remote else '不包含'}")
 
         if changes and db.update_settings(
-            user_id, notify_interval_hours=interval, max_jobs_per_run=max_jobs_per_run
+            user_id,
+            notify_interval_hours=interval,
+            max_jobs_per_run=max_jobs_per_run,
+            include_remote=include_remote,
         ):
             _reply(reply_token, "已經幫你更新設定 ✅\n" + "\n".join(changes) + "\n\n其他訂閱條件維持不變。")
         else:
@@ -133,6 +143,10 @@ def _handle_text_message(user_id: str, reply_token: str, text: str) -> None:
     existing = db.get_subscriber(user_id)
     final_interval = interval or (existing["notify_interval_hours"] if existing else 1)
     final_max_jobs = max_jobs_per_run or (existing["max_jobs_per_run"] if existing else 5)
+    if include_remote is not None:
+        final_include_remote = include_remote
+    else:
+        final_include_remote = existing["include_remote"] if existing else True
 
     area_label = parsed["area"]
     area_code = AREA_CODE_MAP.get(area_label) if area_label else None
@@ -144,10 +158,14 @@ def _handle_text_message(user_id: str, reply_token: str, text: str) -> None:
         min_annual_salary=parsed["min_annual_salary"],
         mrt_stations=parsed.get("mrt_stations"),
         max_walk_km=parsed.get("max_walk_km"),
+        include_remote=include_remote,
         notify_interval_hours=interval,
         max_jobs_per_run=max_jobs_per_run,
     )
-    _reply(reply_token, _confirmation_message(parsed, final_interval, final_max_jobs))
+    _reply(
+        reply_token,
+        _confirmation_message(parsed, final_interval, final_max_jobs, final_include_remote),
+    )
 
 
 @app.post("/webhook")

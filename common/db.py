@@ -25,7 +25,7 @@ def get_active_subscribers() -> list[dict]:
             cur.execute(
                 """
                 select line_user_id, keywords, area_code, area_label,
-                       min_annual_salary, mrt_stations, max_walk_km,
+                       min_annual_salary, mrt_stations, max_walk_km, include_remote,
                        notify_interval_hours, max_jobs_per_run, last_checked_at
                 from subscribers
                 where active = true
@@ -42,14 +42,15 @@ def upsert_subscriber(
     min_annual_salary: int | None,
     mrt_stations: list[str] | None = None,
     max_walk_km: float | None = None,
+    include_remote: bool | None = None,
     notify_interval_hours: int | None = None,
     max_jobs_per_run: int | None = None,
 ) -> None:
     """新增或覆蓋一位訂閱者的職缺條件。
 
-    notify_interval_hours、max_jobs_per_run 是唯一「不覆蓋」的兩個欄位：訊息裡沒
-    提到通知頻率／每次筆數時（傳 None），沿用資料庫裡原本的值（新訂閱者則分別預設
-    1 小時、5 筆），不會被重置，避免使用者每次調整職缺條件都要重講一次這些設定。
+    include_remote、notify_interval_hours、max_jobs_per_run 是唯一「不覆蓋」的三個
+    欄位：訊息裡沒提到時（傳 None），沿用資料庫裡原本的值（新訂閱者則分別預設
+    True、1 小時、5 筆），不會被重置，避免使用者每次調整職缺條件都要重講一次這些設定。
     """
     with closing(get_connection()) as conn, conn:
         with conn.cursor() as cur:
@@ -57,9 +58,10 @@ def upsert_subscriber(
                 """
                 insert into subscribers
                     (line_user_id, keywords, area_code, area_label, min_annual_salary,
-                     mrt_stations, max_walk_km, notify_interval_hours, max_jobs_per_run,
-                     active, updated_at)
-                values (%s, %s, %s, %s, %s, %s, %s, coalesce(%s, 1), coalesce(%s, 5), true, now())
+                     mrt_stations, max_walk_km, include_remote, notify_interval_hours,
+                     max_jobs_per_run, active, updated_at)
+                values (%s, %s, %s, %s, %s, %s, %s, coalesce(%s, true), coalesce(%s, 1),
+                        coalesce(%s, 5), true, now())
                 on conflict (line_user_id) do update set
                     keywords = excluded.keywords,
                     area_code = excluded.area_code,
@@ -67,14 +69,15 @@ def upsert_subscriber(
                     min_annual_salary = excluded.min_annual_salary,
                     mrt_stations = excluded.mrt_stations,
                     max_walk_km = excluded.max_walk_km,
+                    include_remote = coalesce(%s, subscribers.include_remote),
                     notify_interval_hours = coalesce(%s, subscribers.notify_interval_hours),
                     max_jobs_per_run = coalesce(%s, subscribers.max_jobs_per_run),
                     active = true,
                     updated_at = now()
                 """,
                 (line_user_id, keywords, area_code, area_label, min_annual_salary,
-                 mrt_stations, max_walk_km, notify_interval_hours, max_jobs_per_run,
-                 notify_interval_hours, max_jobs_per_run),
+                 mrt_stations, max_walk_km, include_remote, notify_interval_hours, max_jobs_per_run,
+                 include_remote, notify_interval_hours, max_jobs_per_run),
             )
 
 
@@ -82,7 +85,10 @@ def get_subscriber(line_user_id: str) -> dict | None:
     with closing(get_connection()) as conn, conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "select notify_interval_hours, max_jobs_per_run from subscribers where line_user_id = %s",
+                """
+                select notify_interval_hours, max_jobs_per_run, include_remote
+                from subscribers where line_user_id = %s
+                """,
                 (line_user_id,),
             )
             row = cur.fetchone()
@@ -93,10 +99,11 @@ def update_settings(
     line_user_id: str,
     notify_interval_hours: int | None = None,
     max_jobs_per_run: int | None = None,
+    include_remote: bool | None = None,
 ) -> bool:
-    """只調整既有訂閱者的通知設定（頻率／每次筆數），不動其他職缺條件。
+    """只調整既有訂閱者的通知設定（頻率／每次筆數／是否含遠端），不動其他職缺條件。
 
-    兩個參數都是 None 時什麼都不做、直接回傳 False。回傳 False 也代表這個
+    參數全部是 None 時什麼都不做、直接回傳 False。回傳 False 也代表這個
     line_user_id 還沒有啟用中的訂閱（呼叫端應該請使用者先描述一次想找的工作，
     而不是默默建立一筆沒有關鍵字的訂閱）。
     """
@@ -108,6 +115,9 @@ def update_settings(
     if max_jobs_per_run is not None:
         updates.append("max_jobs_per_run = %s")
         params.append(max_jobs_per_run)
+    if include_remote is not None:
+        updates.append("include_remote = %s")
+        params.append(include_remote)
     if not updates:
         return False
 

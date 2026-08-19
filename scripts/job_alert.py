@@ -184,8 +184,10 @@ def is_location_ok(
     mrt_stations: list[str] | None,
     max_walk_km: float | None,
     remote_job_nos: set[str],
+    include_remote: bool = True,
 ) -> bool:
-    if job["jobNo"] in remote_job_nos or (job.get("remoteWorkType") or 0) > 0:
+    is_remote = job["jobNo"] in remote_job_nos or (job.get("remoteWorkType") or 0) > 0
+    if is_remote and include_remote:
         return True
 
     if mrt_stations:
@@ -365,7 +367,10 @@ def main() -> None:
         ]
         matched = [
             job for job in sub_candidates
-            if is_location_ok(job, sub["area_label"], sub["mrt_stations"], sub["max_walk_km"], remote_job_nos)
+            if is_location_ok(
+                job, sub["area_label"], sub["mrt_stations"], sub["max_walk_km"],
+                remote_job_nos, sub["include_remote"],
+            )
             and is_salary_ok(job, sub["min_annual_salary"])
         ]
 

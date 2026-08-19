@@ -47,6 +47,7 @@ RESPONSE_SCHEMA = {
         "mrt_start_station": {"type": "STRING", "enum": ALL_STATIONS},
         "mrt_end_station": {"type": "STRING", "enum": ALL_STATIONS},
         "max_walk_minutes": {"type": "INTEGER"},
+        "include_remote": {"type": "BOOLEAN"},
         "notify_interval_hours": {"type": "INTEGER"},
         "max_jobs_per_run": {"type": "INTEGER"},
     },
@@ -73,6 +74,10 @@ SYSTEM_INSTRUCTION = f"""你是一個求職職缺通知機器人的訊息解析�
   再填 area。
 - max_walk_minutes：使用者說的「步行 X 分鐘內」的 X（整數，分鐘）。只有在有講到步行時間時才填，
   沒提到就省略，不要自己編一個數字。
+- include_remote：是否也要收到「不限地點的全遠端」職缺（跟通勤範圍/城市是 OR 的關係，遠端職缺會
+  無視地區條件）。使用者明確表示「不要遠端」「只要通勤範圍內的」「不用遠端職缺」時設為 false；
+  明確表示「含遠端」「可以遠端」「也要遠端職缺」時設為 true。訊息裡完全沒提到遠端相關字眼時，
+  就省略這個欄位——省略時會沿用使用者原本的設定（新訂閱者預設 true）。
 - notify_interval_hours：使用者想要「多久檢查一次、通知一次」的小時數（整數，介於
   {_MIN_NOTIFY_INTERVAL_HOURS} 到 {_MAX_NOTIFY_INTERVAL_HOURS} 之間）。例如「改成每 2 小時通知我」
   →2、「一天通知一次就好」→24、「恢復成每小時通知」→1。如果訊息裡完全沒提到通知頻率，就省略這個
@@ -119,14 +124,17 @@ def parse(text: str) -> dict | None:
             _MIN_MAX_JOBS_PER_RUN, min(_MAX_MAX_JOBS_PER_RUN, int(max_jobs_per_run))
         )
 
+    include_remote = result.get("include_remote")
+
     if intent == "unclear":
         return None
-    # 訊息裡沒有職稱關鍵字、也沒有要調整通知頻率或筆數，代表真的看不懂在說什麼
+    # 訊息裡沒有職稱關鍵字、也沒有要調整通知頻率/筆數/遠端與否，代表真的看不懂在說什麼
     if (
         intent == "subscribe_or_update"
         and not result.get("keywords")
         and notify_interval is None
         and max_jobs_per_run is None
+        and include_remote is None
     ):
         return None
 
@@ -150,6 +158,7 @@ def parse(text: str) -> dict | None:
         "min_annual_salary": result.get("min_annual_salary"),
         "mrt_stations": mrt_stations,
         "max_walk_km": max_walk_km,
+        "include_remote": include_remote,
         "notify_interval_hours": notify_interval,
         "max_jobs_per_run": max_jobs_per_run,
     }
@@ -165,6 +174,7 @@ if __name__ == "__main__":
         "我想找頂埔到忠孝敦化之間、步行五分鐘內的前後端工程師工作，年薪至少100萬",
         "改成每3小時通知我一次",  # 純調整頻率，keywords 應該是空陣列
         "一次給我10筆就好",  # 純調整筆數，keywords 應該是空陣列
+        "不要遠端的職缺，只要通勤範圍內的",  # 純調整 include_remote，keywords 應該是空陣列
     ]
     for sample in samples:
         print(f"輸入：{sample}")
