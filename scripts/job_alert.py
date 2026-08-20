@@ -191,12 +191,15 @@ def is_location_ok(
         return True
 
     if mrt_stations:
-        # 精準通勤過濾（power-user 欄位）：限定捷運線 + 步行距離
+        # 精準通勤過濾：限定捷運線範圍，步行距離門檻是額外的條件（沒設定就不檢查）
         mrt_desc = job.get("mrtDesc") or ""
-        mrt_dist = job.get("mrtDist")  # 公里，104 沒提供時是 None
         on_line = any(name in mrt_desc for name in mrt_stations)
-        within_walk = mrt_dist is not None and max_walk_km is not None and mrt_dist <= max_walk_km
-        return on_line and within_walk
+        if not on_line:
+            return False
+        if max_walk_km is None:
+            return True  # 只限定捷運站範圍，沒有設定步行距離門檻
+        mrt_dist = job.get("mrtDist")  # 公里，104 沒提供時是 None
+        return mrt_dist is not None and mrt_dist <= max_walk_km
 
     if area_label is None:
         return True  # 訂閱者不限地區
