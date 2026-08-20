@@ -105,7 +105,11 @@ def _handle_text_message(user_id: str, reply_token: str, text: str) -> None:
         _reply(reply_token, UNSUBSCRIBE_MESSAGE)
         return
 
-    parsed = gemini_parser.parse(text)
+    try:
+        parsed = gemini_parser.parse(text)
+    except Exception:  # noqa: BLE001 - Gemini 暫時忙碌/呼叫失敗，跟「看不懂」是不同情況
+        _reply(reply_token, ERROR_MESSAGE)
+        return
     if parsed is None:
         _reply(reply_token, UNCLEAR_MESSAGE)
         return
