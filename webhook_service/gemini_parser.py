@@ -9,6 +9,7 @@ gemini-2.5-flash-lite）會不定期被下架，用別名可以避免每隔幾�
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from google import genai
@@ -36,6 +37,12 @@ _MAX_NOTIFY_INTERVAL_HOURS = 24
 _MIN_MAX_JOBS_PER_RUN = 1
 _MAX_MAX_JOBS_PER_RUN = 20
 _DEFAULT_MAX_JOBS_PER_RUN = 5
+
+# Gemini 偶爾會回傳 503（暫時過載），重試個幾次通常就能成功；重試次數用完仍失敗
+# 就把例外往外拋，讓呼叫端（app.py）知道這是「服務暫時忙碌」而不是「看不懂使用者的話」，
+# 兩者要回覆不同的訊息給使用者
+_MAX_RETRIES = 3
+_RETRY_DELAY_SECONDS = 1.5
 
 RESPONSE_SCHEMA = {
     "type": "OBJECT",
@@ -94,22 +101,33 @@ SYSTEM_INSTRUCTION = f"""你是一個求職職缺通知機器人的訊息解析�
 def parse(text: str) -> dict | None:
     """解析使用者輸入，回傳
     {"intent", "keywords", "area", "min_annual_salary", "mrt_stations", "max_walk_km"}；
-    無法解析或發生錯誤時回傳 None。
+    Gemini 判斷「看不懂使用者在說什麼」時回傳 None；重試用完仍然呼叫失敗（例如 Gemini
+    暫時過載）則把例外往外拋，讓呼叫端能分辨這兩種不同情況、回覆不同的訊息給使用者。
     """
-    try:
-        response = _client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=text,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_schema=RESPONSE_SCHEMA,
-            ),
-        )
-        result = json.loads(response.text)
-    except Exception as exc:  # noqa: BLE001 - 任何 Gemini/網路例外都視為解析失敗
-        print(f"[警告] Gemini 解析失敗：{exc}", file=sys.stderr)
-        return None
+    result = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            response = _client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=text,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=RESPONSE_SCHEMA,
+                ),
+            )
+            result = json.loads(response.text)
+            break
+        except Exception as exc:  # noqa: BLE001 - 任何 Gemini/網路例外都視為暫時性失敗
+            if attempt < _MAX_RETRIES:
+                print(
+                    f"[警告] Gemini 解析失敗（第 {attempt} 次，{_RETRY_DELAY_SECONDS} 秒後重試）：{exc}",
+                    file=sys.stderr,
+                )
+                time.sleep(_RETRY_DELAY_SECONDS)
+            else:
+                print(f"[警告] Gemini 解析失敗（已重試 {_MAX_RETRIES} 次，放棄）：{exc}", file=sys.stderr)
+                raise
 
     intent = result.get("intent")
     notify_interval = result.get("notify_interval_hours")
