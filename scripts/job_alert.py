@@ -51,6 +51,13 @@ PREFERRED_SKILL_KEYWORDS = [
 # 月薪 x 幾個月概估年薪；104 顯示「面議」時一律先納入，讓使用者自行判斷
 BONUS_MONTHS = 14
 
+# 104 的搜尋 API 不會標示 salaryLow/salaryHigh 是月薪還是年薪（只有職缺詳情頁的
+# 另一個 API 才有 salaryType 欄位可以判斷），只能靠數字大小猜：超過這個門檻的數字，
+# 視為 104 給的本身就已經是年薪，不再乘以 BONUS_MONTHS（否則像「年薪100~170萬」
+# 這種職缺會被誤乘成 2380 萬）。目標職缺類型的月薪很少超過這個數字，年薪職缺則幾乎
+# 都遠高於這個數字，用這個門檻區分準確率很高，但無法保證 100% 正確
+ANNUAL_SALARY_THRESHOLD = 300_000
+
 # 每個關鍵字 / 每種查詢類型，最多翻幾頁（每頁 30 筆）；避免對 104 伺服器造成太大負擔
 PAGE_LIMIT = 6
 
@@ -180,7 +187,7 @@ def collect_candidate_jobs(
 
 def is_location_ok(
     job: dict,
-    area_label: str | None,
+    area_labels: list[str] | None,
     mrt_stations: list[str] | None,
     max_walk_km: float | None,
     remote_job_nos: set[str],
@@ -201,19 +208,35 @@ def is_location_ok(
         mrt_dist = job.get("mrtDist")  # 公里，104 沒提供時是 None
         return mrt_dist is not None and mrt_dist <= max_walk_km
 
-    if area_label is None:
+    if not area_labels:
         return True  # 訂閱者不限地區
 
-    return area_label in (job.get("jobAddrNoDesc") or "")
+    address = job.get("jobAddrNoDesc") or ""
+    return any(label in address for label in area_labels)
+
+
+def normalized_salary_range(job: dict) -> tuple[int, int] | None:
+    """回傳 (低, 高)；104 用 9999999 代表「無上限」，這裡拿掉這個特殊值當一般數字用。
+    低、高都是 0 代表面議，回傳 None。
+    """
+    salary_low = job.get("salaryLow") or 0
+    salary_high = job.get("salaryHigh") or 0
+    if salary_high == 9999999:
+        salary_high = 0
+    if not salary_low and not salary_high:
+        return None
+    return salary_low, salary_high
 
 
 def estimate_annual_salary(job: dict) -> int | None:
-    salary_high = job.get("salaryHigh") or 0
-    salary_low = job.get("salaryLow") or 0
-    monthly = salary_high or salary_low
-    if not monthly:
+    salary_range = normalized_salary_range(job)
+    if salary_range is None:
         return None  # 面議 / 未提供數字
-    return monthly * BONUS_MONTHS
+    salary_low, salary_high = salary_range
+    value = salary_high or salary_low
+    if value >= ANNUAL_SALARY_THRESHOLD:
+        return value  # 數字本身已經是年薪範圍，不再乘以 BONUS_MONTHS
+    return value * BONUS_MONTHS
 
 
 def is_salary_ok(job: dict, min_annual_salary: int | None) -> bool:
@@ -264,10 +287,15 @@ def format_job_message(job: dict) -> str:
     district = job.get("jobAddrNoDesc", "")
     mrt = job.get("mrtDesc", "")
     mrt_dist = job.get("mrtDist")
-    is_remote = job.get("_source_remote_query") or (job.get("remoteWorkType") or 0) > 0
+    remote_type = job.get("remoteWorkType") or 0  # 104: 1=完全遠端 2=部分遠端（無提供進辦公室天數）
+    is_remote = job.get("_source_remote_query") or remote_type > 0
 
     location_bits = []
-    if is_remote:
+    if remote_type == 1:
+        location_bits.append("完全遠端")
+    elif remote_type == 2:
+        location_bits.append("部分遠端（需進辦公室，104 未提供天數）")
+    elif is_remote:
         location_bits.append("可遠端")
     if district:
         location_bits.append(district)
@@ -278,13 +306,17 @@ def format_job_message(job: dict) -> str:
             location_bits.append(mrt)
     location_line = " / ".join(location_bits) if location_bits else "地點未提供"
 
-    salary_low = job.get("salaryLow") or 0
-    salary_high = job.get("salaryHigh") or 0
+    salary_range = normalized_salary_range(job)
     annual = estimate_annual_salary(job)
-    if annual is None:
+    if salary_range is None or annual is None:
         salary_line = "薪資面議（請自行洽談確認是否達標）"
     else:
-        salary_line = f"月薪 {salary_low:,}~{salary_high:,}，概估年薪約 {annual:,}"
+        salary_low, salary_high = salary_range
+        range_text = f"{salary_low:,}~{salary_high:,}" if salary_high else f"{salary_low:,}以上"
+        if (salary_high or salary_low) >= ANNUAL_SALARY_THRESHOLD:
+            salary_line = f"年薪 {range_text}"
+        else:
+            salary_line = f"月薪 {range_text}，概估年薪約 {annual:,}（僅供參考，實際依職缺公告）"
 
     link = job.get("link", {}).get("job", "")
 
@@ -333,8 +365,8 @@ def main() -> None:
     print(f"共有 {len(subscribers)} 位啟用中的訂閱者")
 
     all_keywords = {kw for sub in subscribers for kw in sub["keywords"]}
-    area_codes = {sub["area_code"] for sub in subscribers if sub["area_code"]}
-    any_nationwide = any(sub["area_code"] is None for sub in subscribers)
+    area_codes = {code for sub in subscribers for code in (sub["area_codes"] or [])}
+    any_nationwide = any(not sub["area_codes"] for sub in subscribers)
 
     print("開始抓取 104 職缺 ...")
     candidates, job_keywords, remote_job_nos = collect_candidate_jobs(
@@ -371,7 +403,7 @@ def main() -> None:
         matched = [
             job for job in sub_candidates
             if is_location_ok(
-                job, sub["area_label"], sub["mrt_stations"], sub["max_walk_km"],
+                job, sub["area_labels"], sub["mrt_stations"], sub["max_walk_km"],
                 remote_job_nos, sub["include_remote"],
             )
             and is_salary_ok(job, sub["min_annual_salary"])
