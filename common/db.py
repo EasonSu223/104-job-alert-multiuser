@@ -24,7 +24,7 @@ def get_active_subscribers() -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                select line_user_id, keywords, area_code, area_label,
+                select line_user_id, keywords, area_codes, area_labels,
                        min_annual_salary, mrt_stations, max_walk_km, include_remote,
                        notify_interval_hours, max_jobs_per_run, last_checked_at
                 from subscribers
@@ -37,8 +37,8 @@ def get_active_subscribers() -> list[dict]:
 def upsert_subscriber(
     line_user_id: str,
     keywords: list[str],
-    area_code: str | None,
-    area_label: str | None,
+    area_codes: list[str] | None,
+    area_labels: list[str] | None,
     min_annual_salary: int | None,
     mrt_stations: list[str] | None = None,
     max_walk_km: float | None = None,
@@ -46,7 +46,7 @@ def upsert_subscriber(
     notify_interval_hours: int | None = None,
     max_jobs_per_run: int | None = None,
 ) -> None:
-    """新增或覆蓋一位訂閱者的職缺條件。
+    """新增或覆蓋一位訂閱者的職缺條件（訊息裡有職稱關鍵字時才會呼叫這個函式）。
 
     include_remote、notify_interval_hours、max_jobs_per_run 是唯一「不覆蓋」的三個
     欄位：訊息裡沒提到時（傳 None），沿用資料庫裡原本的值（新訂閱者則分別預設
@@ -57,15 +57,15 @@ def upsert_subscriber(
             cur.execute(
                 """
                 insert into subscribers
-                    (line_user_id, keywords, area_code, area_label, min_annual_salary,
+                    (line_user_id, keywords, area_codes, area_labels, min_annual_salary,
                      mrt_stations, max_walk_km, include_remote, notify_interval_hours,
                      max_jobs_per_run, active, updated_at)
                 values (%s, %s, %s, %s, %s, %s, %s, coalesce(%s, true), coalesce(%s, 1),
                         coalesce(%s, 5), true, now())
                 on conflict (line_user_id) do update set
                     keywords = excluded.keywords,
-                    area_code = excluded.area_code,
-                    area_label = excluded.area_label,
+                    area_codes = excluded.area_codes,
+                    area_labels = excluded.area_labels,
                     min_annual_salary = excluded.min_annual_salary,
                     mrt_stations = excluded.mrt_stations,
                     max_walk_km = excluded.max_walk_km,
@@ -75,7 +75,7 @@ def upsert_subscriber(
                     active = true,
                     updated_at = now()
                 """,
-                (line_user_id, keywords, area_code, area_label, min_annual_salary,
+                (line_user_id, keywords, area_codes, area_labels, min_annual_salary,
                  mrt_stations, max_walk_km, include_remote, notify_interval_hours, max_jobs_per_run,
                  include_remote, notify_interval_hours, max_jobs_per_run),
             )
@@ -86,7 +86,8 @@ def get_subscriber(line_user_id: str) -> dict | None:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                select notify_interval_hours, max_jobs_per_run, include_remote
+                select notify_interval_hours, max_jobs_per_run, include_remote,
+                       area_codes, area_labels, min_annual_salary, mrt_stations, max_walk_km
                 from subscribers where line_user_id = %s
                 """,
                 (line_user_id,),
@@ -100,11 +101,18 @@ def update_settings(
     notify_interval_hours: int | None = None,
     max_jobs_per_run: int | None = None,
     include_remote: bool | None = None,
+    area_codes: list[str] | None = None,
+    area_labels: list[str] | None = None,
+    min_annual_salary: int | None = None,
+    mrt_stations: list[str] | None = None,
+    max_walk_km: float | None = None,
 ) -> bool:
-    """只調整既有訂閱者的通知設定（頻率／每次筆數／是否含遠端），不動其他職缺條件。
+    """只調整既有訂閱者訊息裡明確提到的設定，不動其他沒提到的職缺條件。
 
-    參數全部是 None 時什麼都不做、直接回傳 False。回傳 False 也代表這個
-    line_user_id 還沒有啟用中的訂閱（呼叫端應該請使用者先描述一次想找的工作，
+    用在訊息裡沒有職稱關鍵字的情況（例如「改成每3小時通知我」「地區改成新北市」
+    「不要遠端職缺」）——這種訊息不足以構成一次完整的職缺條件重新訂閱，只更新使用者
+    明確提到的那幾項。參數全部是 None 時什麼都不做、直接回傳 False。回傳 False 也代表
+    這個 line_user_id 還沒有啟用中的訂閱（呼叫端應該請使用者先描述一次想找的工作，
     而不是默默建立一筆沒有關鍵字的訂閱）。
     """
     updates = []
@@ -118,6 +126,21 @@ def update_settings(
     if include_remote is not None:
         updates.append("include_remote = %s")
         params.append(include_remote)
+    if area_codes is not None:
+        updates.append("area_codes = %s")
+        params.append(area_codes)
+    if area_labels is not None:
+        updates.append("area_labels = %s")
+        params.append(area_labels)
+    if min_annual_salary is not None:
+        updates.append("min_annual_salary = %s")
+        params.append(min_annual_salary)
+    if mrt_stations is not None:
+        updates.append("mrt_stations = %s")
+        params.append(mrt_stations)
+    if max_walk_km is not None:
+        updates.append("max_walk_km = %s")
+        params.append(max_walk_km)
     if not updates:
         return False
 
