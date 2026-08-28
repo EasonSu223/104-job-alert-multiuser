@@ -16,7 +16,9 @@ import psycopg2.extras
 
 
 def get_connection():
-    return psycopg2.connect(os.environ["SUPABASE_DB_URL"])
+    # connect_timeout：連線卡住時最多等 10 秒就放棄，避免 webhook 的 gunicorn worker
+    # 因為卡在建立資料庫連線而被 timeout 強制 SIGKILL（LINE 完全收不到任何回覆）
+    return psycopg2.connect(os.environ["SUPABASE_DB_URL"], connect_timeout=10)
 
 
 def get_active_subscribers() -> list[dict]:
