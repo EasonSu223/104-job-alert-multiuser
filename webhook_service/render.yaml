@@ -5,7 +5,7 @@ services:
     plan: free
     rootDir: .
     buildCommand: pip install -r webhook_service/requirements.txt
-    startCommand: gunicorn webhook_service.app:app --bind 0.0.0.0:$PORT
+    startCommand: gunicorn webhook_service.app:app --bind 0.0.0.0:$PORT --timeout 90
     envVars:
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
