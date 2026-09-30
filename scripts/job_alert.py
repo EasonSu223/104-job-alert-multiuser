@@ -202,7 +202,8 @@ def is_location_ok(
     if mrt_stations:
         # 精準通勤過濾：限定捷運線範圍，步行距離門檻是額外的條件（沒設定就不檢查）
         mrt_desc = job.get("mrtDesc") or ""
-        on_line = any(name in mrt_desc for name in mrt_stations)
+        # 比對「站名+站」，避免「新埔」誤中「新埔民生站」、「大安」誤中「大安森林公園站」
+        on_line = any(f"{name}站" in mrt_desc for name in mrt_stations)
         if not on_line:
             return False
         if max_walk_km is None:

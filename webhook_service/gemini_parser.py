@@ -8,6 +8,7 @@ gemini-2.5-flash-lite）會不定期被下架，用別名可以避免每隔幾�
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -106,6 +107,23 @@ SYSTEM_INSTRUCTION = f"""你是一個求職職缺通知機器人的訊息解析�
 """
 
 
+# 長站名優先比對，避免「新埔民生」被拆成「新埔」、「大安森林公園」被拆成「大安」
+_STATION_PATTERN = re.compile("|".join(re.escape(s) for s in sorted(ALL_STATIONS, key=len, reverse=True)))
+
+
+def _fallback_mrt_range(text: str) -> tuple[str, str] | None:
+    """Gemini 偶爾會漏填捷運起訖站（例如句子裡同時提到遠端條件時），這裡直接從原文找站名補上。
+
+    只在訊息裡有「捷運」或「站」字時才啟用，避免把「板橋」「中山」這類行政區名誤判成車站。
+    """
+    if "捷運" not in text and "站" not in text:
+        return None
+    found = _STATION_PATTERN.findall(text)
+    if not found:
+        return None
+    return found[0], found[-1]
+
+
 def parse(text: str) -> dict | None:
     """解析使用者輸入，回傳
     {"intent", "keywords", "areas", "min_annual_salary", "mrt_stations", "max_walk_km",
@@ -160,6 +178,11 @@ def parse(text: str) -> dict | None:
 
     mrt_start = result.get("mrt_start_station")
     mrt_end = result.get("mrt_end_station") or mrt_start
+    if not mrt_start:
+        fallback = _fallback_mrt_range(text)
+        if fallback:
+            mrt_start, mrt_end = fallback
+            print(f"[警告] Gemini 漏填捷運範圍，改用原文比對：{mrt_start}↔{mrt_end}", file=sys.stderr)
     mrt_stations = stations_between(mrt_start, mrt_end) if mrt_start else None
     if mrt_stations:
         areas = None  # 有精確捷運範圍時，地區改用這個判斷，不用城市層級的 areas

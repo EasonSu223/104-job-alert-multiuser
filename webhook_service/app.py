@@ -156,16 +156,22 @@ def _handle_text_message(user_id: str, reply_token: str, text: str) -> None:
         if not changes:
             _reply(reply_token, UNCLEAR_MESSAGE)
             return
+        # 捷運範圍與城市是二擇一的地區條件：設定其中一種時要清掉另一種（傳空清單），
+        # 否則殘留的舊城市會讓排程只搜尋那個城市，捷運範圍內其他城市的職缺就搜不到
+        area_kwargs = {}
+        if mrt_stations:
+            area_kwargs = dict(
+                mrt_stations=mrt_stations, max_walk_km=max_walk_km, area_codes=[], area_labels=[]
+            )
+        elif areas:
+            area_kwargs = dict(area_codes=_area_codes(areas), area_labels=areas, mrt_stations=[])
         updated = db.update_settings(
             user_id,
             notify_interval_hours=interval,
             max_jobs_per_run=max_jobs_per_run,
             include_remote=include_remote,
-            area_codes=_area_codes(areas),
-            area_labels=areas,
             min_annual_salary=min_annual_salary,
-            mrt_stations=mrt_stations,
-            max_walk_km=max_walk_km,
+            **area_kwargs,
         )
         if updated:
             _reply(reply_token, "已經幫你更新設定 ✅\n" + "\n".join(changes) + "\n\n其他訂閱條件維持不變。")
