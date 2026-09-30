@@ -39,6 +39,10 @@ UNCLEAR_MESSAGE = (
     "「我想找新北的後端工程師工作，年薪至少90萬」"
 )
 ERROR_MESSAGE = "系統暫時忙碌，請稍後再試一次 🙏"
+NEED_KEYWORDS_MESSAGE = (
+    "你還沒有訂閱職缺通知喔 🙏 請先告訴我想找的職稱，例如：\n"
+    "「我想找頂埔到忠孝新生之間的後端工程師，也要全遠端職缺」"
+)
 UNSUBSCRIBE_MESSAGE = "已經幫你取消訂閱囉，之後不會再收到職缺通知。之後想重新開始，再傳一次你的需求給我即可。"
 
 app = Flask(__name__)
@@ -68,18 +72,26 @@ def _reply(reply_token: str, text: str) -> None:
         print(f"[錯誤] LINE 回覆失敗：HTTP {resp.status_code} {resp.text}", file=sys.stderr)
 
 
-def _confirmation_message(
-    parsed: dict, notify_interval_hours: int, max_jobs_per_run: int, include_remote: bool
-) -> str:
-    keywords_line = "、".join(parsed["keywords"])
+def _area_line(parsed: dict) -> str:
     mrt_stations = parsed.get("mrt_stations")
     if mrt_stations:
         walk_km = parsed.get("max_walk_km")
         walk_bit = f"，步行 {walk_km} 公里內" if walk_km else ""
-        area_line = f"{mrt_stations[0]}↔{mrt_stations[-1]}{walk_bit}"
-    else:
-        area_line = parsed["area"] or "不限"
-    remote_line = "包含" if include_remote else "不包含"
+        return f"捷運 {mrt_stations[0]}↔{mrt_stations[-1]}{walk_bit}"
+    return "、".join(parsed.get("areas") or []) or "不限"
+
+
+def _area_codes(areas: list[str] | None) -> list[str] | None:
+    codes = [AREA_CODE_MAP[a] for a in (areas or []) if a in AREA_CODE_MAP]
+    return codes or None
+
+
+def _confirmation_message(
+    parsed: dict, notify_interval_hours: int, max_jobs_per_run: int, include_remote: bool
+) -> str:
+    keywords_line = "、".join(parsed["keywords"])
+    area_line = _area_line(parsed)
+    remote_line = "包含（僅完全遠端）" if include_remote else "不包含"
     salary = parsed["min_annual_salary"]
     salary_line = f"{salary:,}" if salary else "不限"
     return (
@@ -122,26 +134,43 @@ def _handle_text_message(user_id: str, reply_token: str, text: str) -> None:
     interval = parsed.get("notify_interval_hours")
     max_jobs_per_run = parsed.get("max_jobs_per_run")
     include_remote = parsed.get("include_remote")
+    areas = parsed.get("areas")
+    min_annual_salary = parsed.get("min_annual_salary")
+    mrt_stations = parsed.get("mrt_stations")
+    max_walk_km = parsed.get("max_walk_km")
 
-    # 訊息裡沒有任何職稱關鍵字，代表使用者只是想單獨調整通知設定，不要動到既有的職缺條件
+    # 訊息裡沒有任何職稱關鍵字，代表使用者只是想單獨調整設定，不要動到既有的職缺關鍵字
     if not parsed["keywords"]:
         changes = []
+        if mrt_stations or areas:
+            changes.append(f"地區：{_area_line(parsed)}")
+        if min_annual_salary is not None:
+            changes.append(f"最低年薪：{min_annual_salary:,}")
+        if include_remote is not None:
+            changes.append(f"是否含遠端職缺：{'包含（僅完全遠端）' if include_remote else '不包含'}")
         if interval is not None:
             changes.append(f"通知頻率：每 {interval} 小時檢查一次")
         if max_jobs_per_run is not None:
             changes.append(f"每次最多通知：{max_jobs_per_run} 筆")
-        if include_remote is not None:
-            changes.append(f"是否含遠端職缺：{'包含' if include_remote else '不包含'}")
 
-        if changes and db.update_settings(
+        if not changes:
+            _reply(reply_token, UNCLEAR_MESSAGE)
+            return
+        updated = db.update_settings(
             user_id,
             notify_interval_hours=interval,
             max_jobs_per_run=max_jobs_per_run,
             include_remote=include_remote,
-        ):
+            area_codes=_area_codes(areas),
+            area_labels=areas,
+            min_annual_salary=min_annual_salary,
+            mrt_stations=mrt_stations,
+            max_walk_km=max_walk_km,
+        )
+        if updated:
             _reply(reply_token, "已經幫你更新設定 ✅\n" + "\n".join(changes) + "\n\n其他訂閱條件維持不變。")
         else:
-            _reply(reply_token, UNCLEAR_MESSAGE)
+            _reply(reply_token, NEED_KEYWORDS_MESSAGE)
         return
 
     existing = db.get_subscriber(user_id)
@@ -152,16 +181,14 @@ def _handle_text_message(user_id: str, reply_token: str, text: str) -> None:
     else:
         final_include_remote = existing["include_remote"] if existing else True
 
-    area_label = parsed["area"]
-    area_code = AREA_CODE_MAP.get(area_label) if area_label else None
     db.upsert_subscriber(
         line_user_id=user_id,
         keywords=parsed["keywords"],
-        area_code=area_code,
-        area_label=area_label,
-        min_annual_salary=parsed["min_annual_salary"],
-        mrt_stations=parsed.get("mrt_stations"),
-        max_walk_km=parsed.get("max_walk_km"),
+        area_codes=_area_codes(areas),
+        area_labels=areas,
+        min_annual_salary=min_annual_salary,
+        mrt_stations=mrt_stations,
+        max_walk_km=max_walk_km,
         include_remote=include_remote,
         notify_interval_hours=interval,
         max_jobs_per_run=max_jobs_per_run,

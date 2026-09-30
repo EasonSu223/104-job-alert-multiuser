@@ -105,7 +105,8 @@ def fetch_jobs(keyword: str, *, area: str | None, remote: bool) -> list[dict]:
         if area:
             params["area"] = area
         if remote:
-            params["remoteWork"] = "1,2"
+            # 只查「完全遠端」(1)；部分遠端 (2) 仍需進辦公室，要跟一般職缺一樣走地區/捷運過濾
+            params["remoteWork"] = "1"
 
         try:
             resp = requests.get(API_URL, params=params, headers=HEADERS, timeout=20)
@@ -193,8 +194,9 @@ def is_location_ok(
     remote_job_nos: set[str],
     include_remote: bool = True,
 ) -> bool:
-    is_remote = job["jobNo"] in remote_job_nos or (job.get("remoteWorkType") or 0) > 0
-    if is_remote and include_remote:
+    # 只有完全遠端 (remoteWorkType=1) 才能無視地區條件；部分遠端 (2) 需進辦公室，照一般職缺過濾
+    is_full_remote = job["jobNo"] in remote_job_nos or job.get("remoteWorkType") == 1
+    if is_full_remote and include_remote:
         return True
 
     if mrt_stations:
