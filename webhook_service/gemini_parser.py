@@ -20,9 +20,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common.area_codes import SUPPORTED_CITY_NAMES  # noqa: E402
 from common.mrt_lines import ALL_STATIONS, stations_between  # noqa: E402
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+# Render 上 GEMINI_MODEL 留空時 os.environ.get 會拿到空字串，用 or 才會退回預設值
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-flash-latest"
 
-_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+_client = None
+
+
+def _get_client():
+    """第一次用到時才建立 Gemini client。
+
+    google-genai 沒有 API key 時建立 client 會直接丟 ValueError；如果在 import 時就建立，
+    漏設 GEMINI_API_KEY 會讓 gunicorn 整個啟動失敗（Render 只顯示 Exited with status 1），
+    連健康檢查、取消訂閱這些不需要 Gemini 的功能都無法使用。
+    """
+    global _client
+    if _client is None:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("環境變數 GEMINI_API_KEY 未設定，無法呼叫 Gemini")
+        _client = genai.Client(api_key=api_key)
+    return _client
 
 _AREA_ENUM = SUPPORTED_CITY_NAMES
 
@@ -131,10 +148,11 @@ def parse(text: str) -> dict | None:
     Gemini 判斷「看不懂使用者在說什麼」時回傳 None；重試用完仍然呼叫失敗（例如 Gemini
     暫時過載）則把例外往外拋，讓呼叫端能分辨這兩種不同情況、回覆不同的訊息給使用者。
     """
+    client = _get_client()  # 金鑰沒設定是設定錯誤，重試也沒用，直接往外拋
     result = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            response = _client.models.generate_content(
+            response = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=text,
                 config=types.GenerateContentConfig(
